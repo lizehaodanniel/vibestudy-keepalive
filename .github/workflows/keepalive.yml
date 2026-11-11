@@ -1,38 +1,50 @@
 name: Keep VibeStudy backend awake
 
-# 为什么单独开一个**公开**仓库（2026-11-11 实测后改的方案）：
-#  · 主仓库 VibeStudy 是私有的，GitHub Free 每月只有约 2000 分钟 Actions；
-#    每 5 分钟跑一次 = 8640 分钟/月，月中额度用完，定时任务整月停摆。
-#  · 公开仓库用标准 Linux runner 免费且不扣额度（GitHub 官方计费文档）。
-#  · Render 免费档 15 分钟没有入站请求就休眠，醒来约 1 分钟 —— 用户实报
-#    「点登录第一下特别慢」就是它。5 分钟一次稳稳压在 15 分钟以内。
-#  · 整点是 Actions 高负载时段，排队任务可能被丢弃（官方文档），
-#    所以刻意用 :02 :07 ... :57，避开 :00。
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-11-11 实测后的最终方案：**自续链**，不再依赖 GitHub 的 schedule。
 #
-# ⚠️ 2026-11-11 实测更正：GitHub 的 schedule 是**尽力而为**，不保证准点。
-#    GitHub 官方与社区都有明确案例：新建仓库的高频（5 分钟）定时任务
-#    会被大量丢弃，实际可能几小时才跑一次，甚至连续一整天不触发；
-#    workflow_dispatch 手动触发则一直正常。所以这个文件是「能跑就赚到」
-#    的一层，**不是**可靠的保活承诺。
-#    真要每 5 分钟必到，得用外部定时器直接打
-#    https://vibestudy-app.onrender.com/api/ping （见 README），
-#    或者用带 token 的外部定时器调本仓库的 workflow_dispatch API。
+# 起因：用户实报「点登录第一下特别慢」。Render 免费档 15 分钟没有入站请求
+# 就休眠，醒来约 1 分钟。新建的公开仓库里每 5 分钟一次的 schedule，建仓后
+# 1 小时 15 分本该跑 15 次，GitHub 实际跑了 **0 次**；而 workflow_dispatch
+# 手动触发一直正常。GitHub 官方文档也只承诺 schedule 是 best-effort，
+# 高峰期高频任务会被大量丢弃。把速度押在它上面就是假绿。
+#
+# 所以改成：每一轮用 GITHUB_TOKEN 触发下一轮 workflow_dispatch。GitHub 官方
+# 明确写了 GITHUB_TOKEN 触发的事件默认不会新建 workflow run，但
+# workflow_dispatch / repository_dispatch 是例外；再给 `actions: write`
+# 权限即可。触发目标 workflow 文件必须在默认分支（这里是 main）。
+# 一轮约 9 分钟，稳稳压在 Render 的 15 分钟以内。
+#
+# 公开仓库用标准 Linux runner 免费、不扣 Actions 额度（GitHub 官方计费文档）；
+# 主仓库 VibeStudy 是私有的，GitHub Free 每月只有约 2000 分钟，扛不住这种频率。
+# 这个仓库里没有产品代码、没有密钥，只有一个公开接口地址，可以安全公开。
+#
+# ⚠️ 链万一被整体取消（比如仓库设置变动），heartbeat.yml 每小时会无条件
+#    再排一轮把它接上；它同时写 LAST-ACTIVITY.txt 防「60 天无活动停用定时任务」。
+# ══════════════════════════════════════════════════════════════════════════
 on:
-  schedule:
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
   workflow_dispatch:
+    inputs:
+      chain:
+        description: "1 = 这一轮结束后自动接上下一轮；0 = 只 ping 一次"
+        required: false
+        default: "1"
 
 permissions:
   contents: read
+  actions: write
 
+# 同一时刻只允许一条链。cancel-in-progress: false 让下一轮**排队**而不是
+# 把当前轮掐掉；GitHub 会取消「之前排队的那个」，所以 heartbeat 的补链
+# 不会让链越滚越多。
 concurrency:
-  group: vibestudy-ping
-  cancel-in-progress: true
+  group: vibestudy-keepalive-chain
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 12
     steps:
       - name: Ping the free backend
         shell: bash
@@ -46,5 +58,32 @@ jobs:
             if [ "$code" = "200" ]; then exit 0; fi
             sleep 3
           done
-          echo "这一轮没答上来，等下一轮再试（不把整个任务标红刷屏）"
+          echo "这一轮没答上来（服务可能正在冷启动），下一轮接着戳，不标红刷屏"
           exit 0
+
+      - name: Queue the next round
+        if: ${{ github.event.inputs.chain != '0' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/keepalive.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"chain":"1"}}' || true)
+          echo "下一轮 dispatch -> HTTP $code（204 = 已排上）"
+          # 排不上不标红：heartbeat 每小时还会补一次，别把 Actions 刷成一片红。
+
+      # 先排下一轮再等，就算这一轮中途被取消，队列里那轮也还在。
+      # 每分钟打一行，避免「长时间无输出」被判成卡死。
+      - name: Hold about 9 minutes
+        if: ${{ github.event.inputs.chain != '0' }}
+        shell: bash
+        run: |
+          for i in $(seq 1 9); do
+            echo "等待第 $i/9 分钟…"
+            sleep 60
+          done
+          echo "这一轮结束，队列里的下一轮接着来"
