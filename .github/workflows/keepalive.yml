@@ -8,6 +8,15 @@ name: Keep VibeStudy backend awake
 #    「点登录第一下特别慢」就是它。5 分钟一次稳稳压在 15 分钟以内。
 #  · 整点是 Actions 高负载时段，排队任务可能被丢弃（官方文档），
 #    所以刻意用 :02 :07 ... :57，避开 :00。
+#
+# ⚠️ 2026-11-11 实测更正：GitHub 的 schedule 是**尽力而为**，不保证准点。
+#    GitHub 官方与社区都有明确案例：新建仓库的高频（5 分钟）定时任务
+#    会被大量丢弃，实际可能几小时才跑一次，甚至连续一整天不触发；
+#    workflow_dispatch 手动触发则一直正常。所以这个文件是「能跑就赚到」
+#    的一层，**不是**可靠的保活承诺。
+#    真要每 5 分钟必到，得用外部定时器直接打
+#    https://vibestudy-app.onrender.com/api/ping （见 README），
+#    或者用带 token 的外部定时器调本仓库的 workflow_dispatch API。
 on:
   schedule:
     - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
