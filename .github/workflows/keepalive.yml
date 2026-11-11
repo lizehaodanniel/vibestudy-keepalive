@@ -1,0 +1,41 @@
+name: Keep VibeStudy backend awake
+
+# 为什么单独开一个**公开**仓库（2026-11-11 实测后改的方案）：
+#  · 主仓库 VibeStudy 是私有的，GitHub Free 每月只有约 2000 分钟 Actions；
+#    每 5 分钟跑一次 = 8640 分钟/月，月中额度用完，定时任务整月停摆。
+#  · 公开仓库用标准 Linux runner 免费且不扣额度（GitHub 官方计费文档）。
+#  · Render 免费档 15 分钟没有入站请求就休眠，醒来约 1 分钟 —— 用户实报
+#    「点登录第一下特别慢」就是它。5 分钟一次稳稳压在 15 分钟以内。
+#  · 整点是 Actions 高负载时段，排队任务可能被丢弃（官方文档），
+#    所以刻意用 :02 :07 ... :57，避开 :00。
+on:
+  schedule:
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vibestudy-ping
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping the free backend
+        shell: bash
+        run: |
+          url="https://vibestudy-app.onrender.com/api/ping"
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 \
+              -H 'User-Agent: VibeStudy-keepalive/1.0 (GitHub Actions)' \
+              "$url" || true)
+            echo "ping $i -> HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "这一轮没答上来，等下一轮再试（不把整个任务标红刷屏）"
+          exit 0

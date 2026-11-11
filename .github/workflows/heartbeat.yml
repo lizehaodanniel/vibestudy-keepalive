@@ -1,0 +1,36 @@
+name: Keep this repo active
+
+# 公开仓库连续 60 天没有仓库活动，GitHub 会自动停掉所有定时任务
+# （官方文档 events-that-trigger-workflows#schedule）。每周写一行时间戳，
+# 让保活仓库一直算「有活动」。不额外花钱，也不碰 VibeStudy 主仓库。
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vibestudy-heartbeat
+  cancel-in-progress: true
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Weekly activity stamp
+        shell: bash
+        run: |
+          git config user.name "VibeStudy keepalive"
+          git config user.email "keepalive@users.noreply.github.com"
+          date -u '+%Y-%m-%dT%H:%M:%SZ' > LAST-ACTIVITY.txt
+          git add LAST-ACTIVITY.txt
+          if git diff --cached --quiet; then
+            echo "no change"
+          else
+            git commit -m "chore: weekly activity stamp"
+            git push
+          fi
